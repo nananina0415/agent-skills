@@ -44,7 +44,7 @@ Codex 스킬은 Claude Code의 슬래시 커맨드 인자(`$ARGUMENTS`)처럼 �
 ### 1. 대상 세션 파일 찾기
 
 ```
-python3 scripts/find_latest_session.py --source claude|codex|both
+python3 scripts/find_latest_session.py --agent claude|codex --source claude|codex|both
 ```
 
 출력은 `KEY=VALUE` 형태 평문이다 (JSON도 한글도 아님 — 콘솔 인코딩 문제를 피하기 위함). 예:
@@ -56,9 +56,11 @@ CODEX_EXCLUDED_GUARDIAN_REVIEW=3
 CODEX_TOTAL_CANDIDATES=1
 ```
 
-`ERROR=...`로 시작하면 중단하고 사용자에게 그대로 보고한다 (예: Claude 세션 파일이 1개뿐이라 "현재 세션 제외" 로직이 성립하지 않는 경우).
+`--agent`에는 **지금 이 스크립트를 실행하는 에이전트**를 넣는다. Claude Code에서 실행 중이면 `claude`, Codex에서 실행 중이면 `codex`다. `--source`는 사용자가 찾으려는 세션 종류다. 두 인자를 혼동하지 않는다.
 
-Claude 쪽은 **mtime 기준 2번째로 최신 파일**을 고른다 (가장 최신 = 지금 이 스킬을 실행 중인 세션 자신이므로 제외). Codex 쪽은 `thread_source == "guardian_review"`인 서브스레드 파일은 자동으로 후보에서 빠진다 — 몇 개가 빠졌는지만 카운트로 보고되고 내용은 보지 않는다.
+`ERROR=...`로 시작하면 중단하고 사용자에게 그대로 보고한다 (예: 현재 에이전트의 세션 파일이 1개뿐이라 현재 세션 제외가 불가능한 경우).
+
+현재 에이전트와 같은 종류의 세션에서는 mtime 기준 **2번째로 최신 파일**을 고르고, 다른 종류의 세션에서는 **가장 최신 파일**을 고른다. Codex 쪽은 `thread_source == "guardian_review"`인 서브스레드 파일을 먼저 후보에서 제외한다 — 몇 개가 빠졌는지만 카운트로 보고되고 내용은 보지 않는다.
 
 ### 2. 1차 파싱 (overview)
 

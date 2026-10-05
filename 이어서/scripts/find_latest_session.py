@@ -6,7 +6,7 @@ caller never has to deal with console-encoding issues. On failure, prints
 ERROR=<message> and exits with a non-zero status.
 
 Usage:
-    find_latest_session.py --source claude|codex|both [--cwd <path>]
+    find_latest_session.py --agent claude|codex --source claude|codex|both [--cwd <path>]
 """
 import argparse
 import json
@@ -24,7 +24,7 @@ def encode_cwd(cwd: str) -> str:
     return "".join("-" if c in (":", "\\", "/") else c for c in cwd)
 
 
-def find_claude_candidate(cwd: str):
+def find_claude_candidate(cwd: str, exclude_current: bool):
     projects_dir = Path.home() / ".claude" / "projects" / encode_cwd(cwd)
     if not projects_dir.is_dir():
         return None, {"error": f"claude project dir not found: {projects_dir}"}
@@ -32,20 +32,21 @@ def find_claude_candidate(cwd: str):
     files = [p for p in projects_dir.glob("*.jsonl") if p.is_file()]
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
-    if len(files) < 2:
+    required = 2 if exclude_current else 1
+    if len(files) < required:
         return None, {
             "error": (
-                f"need at least 2 claude session files to exclude the "
-                f"currently running one, found {len(files)} in {projects_dir}"
+                f"need at least {required} claude session files, "
+                f"found {len(files)} in {projects_dir}"
             )
         }
 
-    # files[0] is assumed to be the session invoking this script right now.
-    chosen = files[1]
+    # Only a Claude caller has a current Claude session to exclude.
+    chosen = files[1] if exclude_current else files[0]
     return chosen, {"dir": str(projects_dir), "total_files": len(files)}
 
 
-def find_codex_candidate():
+def find_codex_candidate(exclude_current: bool):
     base = Path.home() / ".codex" / "sessions"
     files = sorted(base.glob("*/*/*/rollout-*.jsonl"))
     if not files:
@@ -69,15 +70,19 @@ def find_codex_candidate():
             continue
         candidates.append(f)
 
-    if not candidates:
+    required = 2 if exclude_current else 1
+    if len(candidates) < required:
         return None, {
-            "error": "no non-guardian_review codex session files found",
+            "error": (
+                f"need at least {required} non-guardian_review codex session files, "
+                f"found {len(candidates)}"
+            ),
             "excluded_guardian_review": excluded_guardian,
             "unreadable": unreadable,
         }
 
     candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    chosen = candidates[0]
+    chosen = candidates[1] if exclude_current else candidates[0]
     return chosen, {
         "dir": str(base),
         "excluded_guardian_review": excluded_guardian,
@@ -94,6 +99,8 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     ap = argparse.ArgumentParser()
+    ap.add_argument("--agent", choices=["claude", "codex"], required=True,
+                    help="The agent running this script; its current session is excluded")
     ap.add_argument("--source", choices=["claude", "codex", "both"], default="both")
     ap.add_argument("--cwd", default=None, help="Project cwd for Claude session lookup (defaults to current dir)")
     args = ap.parse_args()
@@ -108,7 +115,7 @@ def main():
     diagnostics = {}
 
     if args.source in ("claude", "both"):
-        f, info = find_claude_candidate(cwd)
+        f, info = find_claude_candidate(cwd, exclude_current=args.agent == "claude")
         diagnostics["claude"] = info
         if f is not None:
             mtime = f.stat().st_mtime
@@ -116,7 +123,7 @@ def main():
                 chosen_file, chosen_source, chosen_mtime = f, "claude", mtime
 
     if args.source in ("codex", "both"):
-        f, info = find_codex_candidate()
+        f, info = find_codex_candidate(exclude_current=args.agent == "codex")
         diagnostics["codex"] = info
         if f is not None:
             mtime = f.stat().st_mtime
