@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Find the most recent Claude Code and/or Codex CLI session file.
+"""Find the session that was active right before the current session started.
+
+The current session is the caller's session with the latest event. Candidates
+are compared by their last event before the current session's first event, so
+a session used in parallel cannot outrank the one the user just left. Times
+come from the "timestamp" field inside each file because file mtimes do not
+track activity in Codex rollout files.
 
 Prints plain ASCII key=value lines to stdout (no Korean, no JSON) so the
 caller never has to deal with console-encoding issues. On failure, prints
@@ -10,7 +16,9 @@ Usage:
 """
 import argparse
 import json
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -24,36 +32,37 @@ def encode_cwd(cwd: str) -> str:
     return "".join("-" if c in (":", "\\", "/") else c for c in cwd)
 
 
-def find_claude_candidate(cwd: str, exclude_current: bool):
+def read_event_times(path: Path):
+    """Return every parsable event time in a session file, as epoch seconds."""
+    times = []
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                raw = json.loads(line).get("timestamp")
+                times.append(datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
+            except (ValueError, AttributeError, TypeError):
+                continue
+    return times
+
+
+def find_claude_files(cwd: str):
     projects_dir = Path.home() / ".claude" / "projects" / encode_cwd(cwd)
     if not projects_dir.is_dir():
-        return None, {"error": f"claude project dir not found: {projects_dir}"}
+        return [], {"error": f"claude project dir not found: {projects_dir}"}
 
     files = [p for p in projects_dir.glob("*.jsonl") if p.is_file()]
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-
-    required = 2 if exclude_current else 1
-    if len(files) < required:
-        return None, {
-            "error": (
-                f"need at least {required} claude session files, "
-                f"found {len(files)} in {projects_dir}"
-            )
-        }
-
-    # Only a Claude caller has a current Claude session to exclude.
-    chosen = files[1] if exclude_current else files[0]
-    return chosen, {"dir": str(projects_dir), "total_files": len(files)}
+    return files, {"dir": str(projects_dir), "total_candidates": len(files)}
 
 
-def find_codex_candidate(exclude_current: bool):
+def find_codex_files(cwd: str):
     base = Path.home() / ".codex" / "sessions"
     files = sorted(base.glob("*/*/*/rollout-*.jsonl"))
     if not files:
-        return None, {"error": f"no codex rollout files under {base}"}
+        return [], {"error": f"no codex rollout files under {base}"}
 
     candidates = []
-    excluded_guardian = 0
+    excluded_subagent = 0
+    excluded_other_cwd = 0
     unreadable = 0
     for f in files:
         try:
@@ -65,30 +74,33 @@ def find_codex_candidate(exclude_current: bool):
             unreadable += 1
             continue
 
-        if payload.get("thread_source") == "guardian_review":
-            excluded_guardian += 1
+        # guardian_review threads and spawned agents both carry source.subagent.
+        source = payload.get("source")
+        if isinstance(source, dict) and "subagent" in source:
+            excluded_subagent += 1
+            continue
+        if os.path.normcase(payload.get("cwd", "")) != os.path.normcase(cwd):
+            excluded_other_cwd += 1
             continue
         candidates.append(f)
 
-    required = 2 if exclude_current else 1
-    if len(candidates) < required:
-        return None, {
-            "error": (
-                f"need at least {required} non-guardian_review codex session files, "
-                f"found {len(candidates)}"
-            ),
-            "excluded_guardian_review": excluded_guardian,
-            "unreadable": unreadable,
-        }
-
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    chosen = candidates[1] if exclude_current else candidates[0]
-    return chosen, {
+    return candidates, {
         "dir": str(base),
-        "excluded_guardian_review": excluded_guardian,
+        "excluded_subagent": excluded_subagent,
+        "excluded_other_cwd": excluded_other_cwd,
         "unreadable": unreadable,
         "total_candidates": len(candidates),
     }
+
+
+def to_iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+
+
+def print_diagnostics(diagnostics):
+    for src, info in diagnostics.items():
+        for k, v in info.items():
+            print(f"{src.upper()}_{k.upper()}={v}")
 
 
 def main():
@@ -100,50 +112,55 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--agent", choices=["claude", "codex"], required=True,
-                    help="The agent running this script; its current session is excluded")
+                    help="The agent running this script; its latest session is the current one")
     ap.add_argument("--source", choices=["claude", "codex", "both"], default="both")
-    ap.add_argument("--cwd", default=None, help="Project cwd for Claude session lookup (defaults to current dir)")
+    ap.add_argument("--cwd", default=None, help="Project cwd to match sessions against (defaults to current dir)")
     args = ap.parse_args()
 
-    import os
-
     cwd = args.cwd or os.getcwd()
+    sources = ["claude", "codex"] if args.source == "both" else [args.source]
+    finders = {"claude": find_claude_files, "codex": find_codex_files}
+
+    # The caller's side is always loaded because it defines the current session.
+    sessions = {}
+    diagnostics = {}
+    for src in dict.fromkeys(sources + [args.agent]):
+        files, diagnostics[src] = finders[src](cwd)
+        timed = [(f, read_event_times(f)) for f in files]
+        sessions[src] = [(f, times) for f, times in timed if times]
+
+    if not sessions[args.agent]:
+        print(f"ERROR=no {args.agent} session found to treat as the current session")
+        print_diagnostics(diagnostics)
+        sys.exit(1)
+
+    current_file, current_times = max(sessions[args.agent], key=lambda s: max(s[1]))
+    current_start = min(current_times)
 
     chosen_file = None
     chosen_source = None
-    chosen_mtime = -1.0
-    diagnostics = {}
-
-    if args.source in ("claude", "both"):
-        f, info = find_claude_candidate(cwd, exclude_current=args.agent == "claude")
-        diagnostics["claude"] = info
-        if f is not None:
-            mtime = f.stat().st_mtime
-            if mtime > chosen_mtime:
-                chosen_file, chosen_source, chosen_mtime = f, "claude", mtime
-
-    if args.source in ("codex", "both"):
-        f, info = find_codex_candidate(exclude_current=args.agent == "codex")
-        diagnostics["codex"] = info
-        if f is not None:
-            mtime = f.stat().st_mtime
-            if mtime > chosen_mtime:
-                chosen_file, chosen_source, chosen_mtime = f, "codex", mtime
+    chosen_time = None
+    for src in sources:
+        for f, times in sessions[src]:
+            if f == current_file:
+                continue
+            before_start = [t for t in times if t < current_start]
+            if before_start and (chosen_time is None or max(before_start) > chosen_time):
+                chosen_file, chosen_source, chosen_time = f, src, max(before_start)
 
     if chosen_file is None:
-        print("ERROR=no candidate session file found")
-        for src, info in diagnostics.items():
-            if "error" in info:
-                print(f"ERROR_{src.upper()}={info['error']}")
+        print("ERROR=no session has activity before the current session started")
+        print(f"CURRENT_FILE={current_file}")
+        print(f"CURRENT_START={to_iso(current_start)}")
+        print_diagnostics(diagnostics)
         sys.exit(1)
 
     print(f"FILE={chosen_file}")
     print(f"SOURCE={chosen_source}")
-    for src, info in diagnostics.items():
-        for k, v in info.items():
-            if k == "error":
-                continue
-            print(f"{src.upper()}_{k.upper()}={v}")
+    print(f"LAST_ACTIVITY={to_iso(chosen_time)}")
+    print(f"CURRENT_FILE={current_file}")
+    print(f"CURRENT_START={to_iso(current_start)}")
+    print_diagnostics(diagnostics)
 
 
 if __name__ == "__main__":

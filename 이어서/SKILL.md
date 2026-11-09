@@ -52,15 +52,23 @@ python3 scripts/find_latest_session.py --agent claude|codex --source claude|code
 ```
 FILE=C:\Users\x\.codex\sessions\2026\10\05\rollout-....jsonl
 SOURCE=codex
-CODEX_EXCLUDED_GUARDIAN_REVIEW=3
+LAST_ACTIVITY=2026-10-05T03:47:32.259000+00:00
+CURRENT_FILE=C:\Users\x\.claude\projects\...\....jsonl
+CURRENT_START=2026-10-05T03:48:13.323000+00:00
+CODEX_EXCLUDED_SUBAGENT=3
+CODEX_EXCLUDED_OTHER_CWD=2
 CODEX_TOTAL_CANDIDATES=1
 ```
 
 `--agent`에는 **지금 이 스크립트를 실행하는 에이전트**를 넣는다. Claude Code에서 실행 중이면 `claude`, Codex에서 실행 중이면 `codex`다. `--source`는 사용자가 찾으려는 세션 종류다. 두 인자를 혼동하지 않는다.
 
-`ERROR=...`로 시작하면 중단하고 사용자에게 그대로 보고한다 (예: 현재 에이전트의 세션 파일이 1개뿐이라 현재 세션 제외가 불가능한 경우).
+`ERROR=...`로 시작하면 중단하고 사용자에게 그대로 보고한다 (예: 현재 세션이 시작되기 전에 활동한 세션이 없는 경우).
 
-현재 에이전트와 같은 종류의 세션에서는 mtime 기준 **2번째로 최신 파일**을 고르고, 다른 종류의 세션에서는 **가장 최신 파일**을 고른다. Codex 쪽은 `thread_source == "guardian_review"`인 서브스레드 파일을 먼저 후보에서 제외한다 — 몇 개가 빠졌는지만 카운트로 보고되고 내용은 보지 않는다.
+**세션 선택은 스크립트가 단독으로 결정한다. 에이전트가 후보를 비교해 다시 고르거나 사용자에게 고르게 하지 않는다.** 선택 기준은 다음과 같다.
+
+1. Codex 쪽은 `source`에 `subagent`가 있는 스레드(`guardian_review` 포함)와 `cwd`가 현재 작업 폴더와 다른 세션을 후보에서 제외한다. 몇 개가 빠졌는지만 카운트로 보고되고 내용은 보지 않는다.
+2. `--agent` 쪽 세션 중 마지막 이벤트가 가장 늦은 파일을 현재 세션으로 보고, 그 파일의 첫 이벤트 시각을 시작 시각으로 삼는다.
+3. 현재 세션을 뺀 후보마다 시작 시각 이전의 마지막 이벤트 시각을 구해 가장 늦은 파일 하나를 고른다. 시각은 파일 변경시각이 아니라 파일 안의 `timestamp`를 쓴다. Codex rollout 파일의 변경시각은 실제 활동을 따라가지 않기 때문이다.
 
 ### 2. 1차 파싱 (overview)
 
